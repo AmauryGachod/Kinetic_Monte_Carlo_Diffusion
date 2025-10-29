@@ -12,4 +12,4 @@ using the Kinetic Monte Carlo (KMC) method.
 ## Usage
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run KMC_Diffusion.py
