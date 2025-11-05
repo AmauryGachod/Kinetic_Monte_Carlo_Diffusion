@@ -85,19 +85,54 @@ def kmc_modified(num_steps, Gamma1, Gamma2, a, b):
 # MSD et diffusion
 # ----------------------
 
+# def compute_msd_per_component(positions):
+#     N = positions.shape[0]
+#     max_lag = N//4
+#     msd_x = np.zeros(max_lag)
+#     msd_y = np.zeros(max_lag)
+#     x = positions[:,0]
+#     y = positions[:,1]
+#     for lag in range(1, max_lag):
+#         diffs_x = x[lag:] - x[:-lag]
+#         diffs_y = y[lag:] - y[:-lag]
+#         msd_x[lag] = np.mean(diffs_x**2)
+#         msd_y[lag] = np.mean(diffs_y**2)
+#     return np.arange(1,max_lag), msd_x[1:], msd_y[1:]
+
+from numba import njit
+import numpy as np
+
+import numpy as np
+
 def compute_msd_per_component(positions):
+    """
+    Calcule <[x(t0+t) - x(t0)]^2> et <[y(t0+t) - y(t0)]^2> en fonction de t,
+    par la méthode zero offset.
+
+    positions : ndarray Nx2 avec colonnes x,y
+    
+    Returns:
+    t_vals (lags), corr_x, corr_y
+    """
     N = positions.shape[0]
-    max_lag = N//4
-    msd_x = np.zeros(max_lag)
-    msd_y = np.zeros(max_lag)
-    x = positions[:,0]
-    y = positions[:,1]
+    max_lag = N // 4  # garder bonne statistique
+    corr_x = np.zeros(max_lag)
+    corr_y = np.zeros(max_lag)
+    
+    x = positions[:, 0]
+    y = positions[:, 1]
+    
     for lag in range(1, max_lag):
         diffs_x = x[lag:] - x[:-lag]
         diffs_y = y[lag:] - y[:-lag]
-        msd_x[lag] = np.mean(diffs_x**2)
-        msd_y[lag] = np.mean(diffs_y**2)
-    return np.arange(1,max_lag), msd_x[1:], msd_y[1:]
+        corr_x[lag] = np.mean(diffs_x**2)
+        corr_y[lag] = np.mean(diffs_y**2)
+    
+    t_vals = np.arange(max_lag)
+    return t_vals[1:], corr_x[1:], corr_y[1:]
+
+
+
 
 def estimate_diffusion_coefficient(t_vals, msd_x, msd_y, fit_ratio=1):
     max_fit = int(len(t_vals)*fit_ratio)
@@ -159,7 +194,9 @@ def main():
                 traj = kmc_classical(num_steps, Gamma1, Gamma2, a)
             else:
                 traj = kmc_modified(num_steps, Gamma1, Gamma2, a, b)
+            st.write(traj)
             t_vals, msd_x, msd_y = compute_msd_per_component(traj)
+            st.scatter_chart({"t": t_vals, "msd_x": msd_x, "msd_y": msd_y})
             D_num = estimate_diffusion_coefficient(t_vals, msd_x, msd_y)
             D_ana = analytical_diffusion_coefficient(Gamma1, Gamma2, a, b)
 
