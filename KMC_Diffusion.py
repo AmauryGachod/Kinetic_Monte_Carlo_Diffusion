@@ -2,19 +2,25 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objs as go
 import json
-from numba import njit  # pour accélérer les boucles KMC
-
+# numba is optional; left imported at the top for future acceleration but not used with @njit here
+from numba import njit
 st.set_page_config(
     page_title="Monte Carlo Diffusion Dashboard",
     page_icon="🧪",
     layout="wide"
 )
 
+
 # ----------------------
-# Fonctions utilitaires
+# Utility functions
 # ----------------------
 
 def prepare_json_download(positions):
+    """Prepare a JSON string for downloading a trajectory.
+
+    positions: ndarray of shape (N,2) with columns x,y
+    Returns a pretty-printed JSON string with time, x and y arrays.
+    """
     t_vals = np.arange(len(positions))
     data_dict = {"time": t_vals.tolist(),
                  "x": positions[:, 0].tolist(),
@@ -22,67 +28,93 @@ def prepare_json_download(positions):
     return json.dumps(data_dict, indent=4)
 
 # ----------------------
-# KMC Simulation
+# KMC simulations
 # ----------------------
 
-@njit
-def kmc_classical(num_steps, Gamma1, Gamma2, a):
-    positions = np.zeros((num_steps+1, 2))
-    d1 = a
-    d2 = np.sqrt(2) * a
-    directions_type1 = np.array([[d1, 0], [-d1, 0], [0, d1], [0, -d1]])
-    directions_type2 = np.array([[d2, d2], [d2, -d2], [-d2, d2], [-d2, -d2]])
-    Gamma_tot = Gamma1 + Gamma2
-    prob_gamma1 = Gamma1 / Gamma_tot
+def make_rng(seed=None):
+    """Create a numpy random generator (harmonized with notebook)."""
+    return np.random.default_rng(seed)
 
-    for i in range(1, num_steps+1):
-        r = np.random.rand()
-        if r < prob_gamma1:
-            step = directions_type1[np.random.randint(0, 4)]
+def kmc_classical(num_steps, Gamma1, Gamma2, a=1.0, seed=None):
+    """Classical KMC simulation (harmonized with notebook)."""
+    rng = make_rng(seed)
+    Gamma = float(Gamma1) + float(Gamma2)
+    if Gamma <= 0:
+        raise ValueError("Γ₁ + Γ₂ must be > 0")
+    dt = 1.0 / Gamma
+
+    pos = np.zeros((num_steps + 1, 2))
+    times = np.zeros(num_steps + 1)
+
+    moves_10 = np.array([[1,0],[-1,0],[0,1],[0,-1]], dtype=float)
+    moves_11 = np.array([[1,1],[-1,-1],[1,-1],[-1,1]], dtype=float)
+
+    for n in range(num_steps):
+        r = rng.random()
+        move = moves_10[rng.integers(0,4)] if r < (Gamma1/Gamma) else moves_11[rng.integers(0,4)]
+        pos[n+1] = pos[n] + move
+        times[n+1] = times[n] + dt
+
+    return pos * a, times
+
+def kmc_modified_with_O(num_steps, Gamma_trans, Gamma_rot, a=1.0, b=0.25, seed=None):
+    """Modified KMC with O atom tracking (harmonized with notebook)."""
+    rng = make_rng(seed)
+    Gamma = Gamma_trans + Gamma_rot
+    if Gamma <= 0:
+        raise ValueError("Gamma_trans + Gamma_rot must be > 0")
+    dt = 1.0 / Gamma
+
+    state_unit = {
+        0: np.array([1.0, 0.0]),   # right
+        1: np.array([0.0, 1.0]),   # up
+        2: np.array([-1.0, 0.0]),  # left
+        3: np.array([0.0, -1.0])   # down
+    }
+    neighbor_offset = {
+        0: np.array([1, 0]),   # right neighbor
+        1: np.array([0, 1]),   # up neighbor
+        2: np.array([-1, 0]),  # left neighbor
+        3: np.array([0, -1])   # down neighbor
+    }
+
+    pos_H = np.zeros((num_steps + 1, 2))
+    pos_O = np.zeros((num_steps + 1, 2))
+    times = np.zeros(num_steps + 1)
+
+    ix, iy = 0, 0
+    state = 0
+
+    O_pos = np.array([ix * a, iy * a], dtype=float)
+    H_pos = O_pos + state_unit[state] * b
+    pos_H[0] = H_pos
+    pos_O[0] = O_pos
+
+    prob_trans = Gamma_trans / Gamma
+
+    for n in range(num_steps):
+        u = rng.random()
+        if u < prob_trans and Gamma_trans > 0:
+            off = neighbor_offset[state]
+            ix += int(off[0])
+            iy += int(off[1])
+            state = (state + 2) % 4
+            O_pos = np.array([ix * a, iy * a], dtype=float)
+            H_pos = O_pos + state_unit[state] * b
         else:
-            step = directions_type2[np.random.randint(0, 4)]
-        positions[i] = positions[i-1] + step
-    return positions
-
-def kmc_modified(num_steps, Gamma1, Gamma2, a, b):
-    positions = np.zeros((num_steps+1, 2))
-    d1 = a - 2*b
-    d_step = b  # pour rotation, pas x=y
-
-    O_position = np.array([0.0, 0.0])
-    H_position = O_position + np.array([b, 0.0])
-    positions[0] = H_position.copy()
-    Gamma_tot = Gamma1 + Gamma2
-    prob_trans = Gamma1 / Gamma_tot
-
-    for i in range(1, num_steps+1):
-        r = np.random.rand()
-        step = np.zeros(2)
-
-        if r < prob_trans and Gamma1 > 0:
-            # Translation
-            directions = np.array([[1,0], [-1,0], [0,1], [0,-1]])
-            dir_vec = directions[np.random.randint(0,4)]
-            step = dir_vec * d1
-            O_position += dir_vec * a
-            H_position = O_position - dir_vec * b
-        else:
-            # Rotation autour du même O
-            
-                rot_dir = np.random.choice(['cw', 'ccw'])
-                angle = np.pi/2 if rot_dir=='ccw' else -np.pi/2
-                rot_matrix = np.array([[np.cos(angle), -np.sin(angle)],
-                                       [np.sin(angle), np.cos(angle)]])
-                rel_vec = H_position - O_position
-                new_H_pos = O_position + rot_matrix @ rel_vec
-                step = new_H_pos - H_position
-                H_position = new_H_pos
-
-        positions[i] = positions[i-1] + step
-    return positions
+            if rng.random() < 0.5:
+                state = (state - 1) % 4
+            else:
+                state = (state + 1) % 4
+            O_pos = np.array([ix * a, iy * a], dtype=float)
+            H_pos = O_pos + state_unit[state] * b
+        pos_H[n+1] = H_pos
+        pos_O[n+1] = O_pos
+        times[n+1] = times[n] + dt
+    return pos_H, times, pos_O
 
 # ----------------------
-# MSD et diffusion
+# MSD and diffusion utilities
 # ----------------------
 
 # def compute_msd_per_component(positions):
@@ -99,73 +131,52 @@ def kmc_modified(num_steps, Gamma1, Gamma2, a, b):
 #         msd_y[lag] = np.mean(diffs_y**2)
 #     return np.arange(1,max_lag), msd_x[1:], msd_y[1:]
 
-from numba import njit
-import numpy as np
+# (top-level imports already include numba and numpy)
 
-import numpy as np
-
-def compute_msd_per_component(positions):
-    """
-    Calcule <[x(t0+t) - x(t0)]^2> et <[y(t0+t) - y(t0)]^2> en fonction de t,
-    par la méthode zero offset.
-
-    positions : ndarray Nx2 avec colonnes x,y
-    
-    Returns:
-    t_vals (lags), corr_x, corr_y
-    """
-    N = positions.shape[0]
-    max_lag = N // 4  # garder bonne statistique
-    corr_x = np.zeros(max_lag)
-    corr_y = np.zeros(max_lag)
-    
-    x = positions[:, 0]
-    y = positions[:, 1]
-    
-    for lag in range(1, max_lag):
-        diffs_x = x[lag:] - x[:-lag]
-        diffs_y = y[lag:] - y[:-lag]
-        corr_x[lag] = np.mean(diffs_x**2)
-        corr_y[lag] = np.mean(diffs_y**2)
-    
-    t_vals = np.arange(max_lag)
-    return t_vals[1:], corr_x[1:], corr_y[1:]
+def compute_msd_zero_offset(positions, max_lag=None):
+    """Compute MSD using zero-offset method (harmonized with notebook)."""
+    N = len(positions)
+    if max_lag is None:
+        max_lag = N // 4
+    lags = np.arange(1, max_lag+1)
+    msd = np.zeros_like(lags, dtype=float)
+    for i, lag in enumerate(lags):
+        diffs = positions[lag:] - positions[:-lag]
+        msd[i] = np.mean(np.sum(diffs**2, axis=1))
+    return lags, msd
 
 
 
 
-def estimate_diffusion_coefficient(t_vals, msd_x, msd_y, fit_ratio=1):
-    max_fit = int(len(t_vals)*fit_ratio)
-    t_fit = t_vals[:max_fit]
-    msd_total = msd_x[:max_fit]+msd_y[:max_fit]
-    slope = np.polyfit(t_fit, msd_total,1)[0]
-    return slope/4  # 2D
+def fit_diffusion_coefficient(lags, msd, Gamma1, Gamma2, fit_range=(200,2000)):
+    """Fit D using notebook's least squares approach."""
+    dt = 1.0 / (Gamma1 + Gamma2)
+    lo, hi = fit_range
+    if hi > lags.max():
+        hi = int(lags.max())
+    sel = (lags >= lo) & (lags <= hi)
+    A = np.vstack([lags[sel]*dt, np.ones(sel.sum())]).T
+    slope, intercept = np.linalg.lstsq(A, msd[sel], rcond=None)[0]
+    return slope/4.0, slope, intercept
 
-def analytical_diffusion_coefficient(Gamma1, Gamma2, a=1.0, b=None):
-    if b is None:
-        d1 = a
-        d2 = np.sqrt(2)*a
-    else:
-        d1 = a-2*b
-        d2 = np.sqrt(2)*b
-    return 0.25*(Gamma1*d1**2 + Gamma2*d2**2)
+def analytic_D(Gamma1, Gamma2, d1, d2):
+    """Analytical D (harmonized with notebook)."""
+    return 0.25 * (Gamma1*d1**2 + Gamma2*d2**2)
 
 # ----------------------
-# Streamlit App
+# Streamlit application
 # ----------------------
 
 def main():
-    # ----------------------
-# Paramètres Streamlit
-# ----------------------
+    # Streamlit UI setup
     st.title("Monte Carlo Diffusion: Classical & Modified")
     model_type = st.radio("Choose diffusion model:", ["Classical","Modified"], horizontal=True)
     num_steps = st.slider("Number of steps", 1000, 500000, 10000, 1000)
 
-    # Choix du nombre de simulations à comparer
+    # Number of simulations to compare
     num_sim = st.slider("Number of simulations", 1, 3, 2, 1)
 
-    # Générer dynamiquement les Γ₁
+    # dynamically generate Γ₁ sliders for each simulation case
     ratios = []
     cols = st.columns(num_sim)
     for i in range(num_sim):
@@ -173,7 +184,7 @@ def main():
             r = st.slider(f"Γ₁ case {i+1}", 0.0, 1.0, 0.25 + 0.25*i, 0.01)
             ratios.append(r)
 
-    # Paramètres du modèle
+    # Model parameters
     a = 1.0
     b = None
     if model_type=="Classical":
@@ -182,23 +193,26 @@ def main():
         a = st.number_input("Parameter a", value=3.0)
         b = st.number_input("Parameter b", value=1.0)
 
-    # ----------------------
-    # Lancer simulation
-    # ----------------------
+    # Run simulations when requested
     if st.button("Run simulation"):
         results = []
         for idx, ratio in enumerate(ratios, start=1):
             Gamma1 = ratio
             Gamma2 = 1 - ratio
-            if model_type=="Classical":
-                traj = kmc_classical(num_steps, Gamma1, Gamma2, a)
+            seed = idx  # ensure reproducibility for each simulation
+            if model_type == "Classical":
+                traj, sim_times = kmc_classical(num_steps, Gamma1, Gamma2, a, seed=seed)
+                # For analytic D, use d1=a, d2=sqrt(2)*a
+                d1, d2 = a, np.sqrt(2)*a
             else:
-                traj = kmc_modified(num_steps, Gamma1, Gamma2, a, b)
-            st.write(traj)
-            t_vals, msd_x, msd_y = compute_msd_per_component(traj)
-            st.scatter_chart({"t": t_vals, "msd_x": msd_x, "msd_y": msd_y})
-            D_num = estimate_diffusion_coefficient(t_vals, msd_x, msd_y)
-            D_ana = analytical_diffusion_coefficient(Gamma1, Gamma2, a, b)
+                pos_H, sim_times, pos_O = kmc_modified_with_O(num_steps, Gamma1, Gamma2, a, b, seed=seed)
+                traj = pos_H
+                # For analytic D, use d1=a-2*b, d2=sqrt(2)*b
+                d1, d2 = a-2*b, np.sqrt(2)*b
+
+            lags, msd = compute_msd_zero_offset(traj, 4000)
+            D_num, slope, intercept = fit_diffusion_coefficient(lags, msd, Gamma1, Gamma2)
+            D_ana = analytic_D(Gamma1, Gamma2, d1, d2)
 
             json_data = prepare_json_download(traj)
             st.download_button(
@@ -208,45 +222,48 @@ def main():
                 mime="application/json",
                 key=idx
             )
-            results.append((ratio, traj, t_vals, msd_x, msd_y, D_num, D_ana))
+            results.append((ratio, traj, sim_times, lags, msd, D_num, D_ana))
 
         st.session_state['results'] = results
-   # --- Affichage ---
+    # --- Display ---
     if 'results' in st.session_state:
         results = st.session_state['results']
-
-        # Nombre de simulations à afficher, selon le nombre de résultats générés
+        # number of simulations to display based on generated results
         num_sim = len(results)
 
-    # Créer dynamiquement les colonnes selon le nombre de simulations actuelles
+        # create columns dynamically based on current number of simulations
         cols = st.columns(num_sim)
 
         for idx, res in enumerate(results):
-            # limiter à la sélection actuelle si nécessaire
-            ratio, traj, t_vals, msd_x, msd_y, D_num, D_ana = res
-            col = cols[idx % num_sim]  # assignation colonne correcte
+            # limit to current selection if necessary
+            ratio, traj, sim_times, lags, msd, D_num, D_ana = res
+            col = cols[idx % num_sim]
             with col:
                 st.markdown(f"### Γ₁={ratio:.2f} | Γ₂={1-ratio:.2f}")
                 st.metric("Estimated D", f"{D_num:.6f}")
                 st.metric("Analytical D", f"{D_ana:.6f}")
 
                 x_vals, y_vals = traj[:,0], traj[:,1]
-                t_vals_triplet = np.arange(len(x_vals))
+                # prefer real simulation times if available and same length as trajectory
+                if sim_times is not None and len(sim_times) == len(x_vals):
+                    z_vals = sim_times
+                else:
+                    z_vals = np.arange(len(x_vals))
 
                 min_val = min(np.min(x_vals), np.min(y_vals))
                 max_val = max(np.max(x_vals), np.max(y_vals))
 
                 fig_traj = go.Figure()
                 fig_traj.add_trace(go.Scatter3d(
-                    x=x_vals, y=y_vals, z=t_vals_triplet, mode='lines+markers',
+                    x=x_vals, y=y_vals, z=z_vals, mode='lines+markers',
                     line=dict(color='lightgray'), marker=dict(size=3), name='Trajectory'
                 ))
                 fig_traj.add_trace(go.Scatter3d(
-                    x=[x_vals[0]], y=[y_vals[0]], z=[t_vals_triplet[0]],
+                    x=[x_vals[0]], y=[y_vals[0]], z=[z_vals[0]],
                     mode='markers', marker=dict(color='green', size=10), name='Start'
                 ))
                 fig_traj.add_trace(go.Scatter3d(
-                    x=[x_vals[-1]], y=[y_vals[-1]], z=[t_vals_triplet[-1]],
+                    x=[x_vals[-1]], y=[y_vals[-1]], z=[z_vals[-1]],
                     mode='markers', marker=dict(color='red', size=10), name='End'
                 ))
 
@@ -264,13 +281,12 @@ def main():
 
                 # MSD plot
                 fig_msd = go.Figure()
-                fig_msd.add_trace(go.Scatter(x=t_vals, y=msd_x, mode='lines', name='MSD x'))
-                fig_msd.add_trace(go.Scatter(x=t_vals, y=msd_y, mode='lines', name='MSD y'))
-                msd_total = msd_x + msd_y
-                fig_msd.add_trace(go.Scatter(x=t_vals, y=msd_total, mode='lines', name='MSD x+y', line=dict(color='purple')))
-                coeffs_total = np.polyfit(t_vals, msd_total,1)
-                fig_msd.add_trace(go.Scatter(x=t_vals, y=coeffs_total[0]*t_vals+coeffs_total[1],
-                                            mode='lines', line=dict(dash='dash'), name=f'Linear fit D={D_num:.6f}'))
+                fig_msd.add_trace(go.Scatter(x=lags, y=msd, mode='lines', name='MSD total'))
+                # add linear fit only when there are enough points
+                if len(lags) >= 2:
+                    fit_line = D_num * 4 * lags + (msd[0] if len(msd) > 0 else 0)
+                    fig_msd.add_trace(go.Scatter(x=lags, y=fit_line,
+                                                mode='lines', line=dict(dash='dash'), name=f'Linear fit D={D_num:.6f}'))
                 fig_msd.update_layout(title="MSD(t)", xaxis_title="t (steps)", yaxis_title="MSD(t)")
                 st.plotly_chart(fig_msd, use_container_width=True)
 
