@@ -23,7 +23,7 @@ The modified model exhibits temporal correlations between rotations and translat
     git clone https://github.com/AmauryGachod/Kinetic_Monte_Carlo_Diffusion.git
     cd Kinetic_Monte_Carlo_Diffusion
     pip install -r requirements.txt
-    streamlit run kmc_hydrogen_diffusion.py
+    streamlit run KMC_Diffusion.py
 
 ## Usage
 
